@@ -47,15 +47,44 @@ impl ErrorCode {
     }
 
     pub fn from_raw_os_error(errno: i32) -> Option<Self> {
-        match errno {
-            libc::ENOENT => Some(Self::Enoent),
-            libc::EPERM => Some(Self::Eperm),
-            libc::EACCES => Some(Self::Eacces),
-            libc::ENOMEM => Some(Self::Enomem),
-            libc::ENOSPC => Some(Self::Enospc),
-            libc::ENODEV | libc::ENXIO | libc::ESHUTDOWN => Some(Self::Eunplugged),
-            libc::EIO => Some(Self::Eio),
-            _ => None,
+        #[cfg(unix)]
+        {
+            match errno {
+                libc::ENOENT => Some(Self::Enoent),
+                libc::EPERM => Some(Self::Eperm),
+                libc::EACCES => Some(Self::Eacces),
+                libc::ENOMEM => Some(Self::Enomem),
+                libc::ENOSPC => Some(Self::Enospc),
+                libc::ENODEV | libc::ENXIO | libc::ESHUTDOWN => Some(Self::Eunplugged),
+                libc::EIO => Some(Self::Eio),
+                _ => None,
+            }
+        }
+        #[cfg(windows)]
+        {
+            match errno {
+                2 | 3 | libc::ENOENT => Some(Self::Enoent),
+                libc::EPERM => Some(Self::Eperm),
+                5 | libc::EACCES => Some(Self::Eacces),
+                8 | 14 | libc::ENOMEM => Some(Self::Enomem),
+                39 | 112 | libc::ENOSPC => Some(Self::Enospc),
+                21 | 1167 | libc::ENODEV | libc::ENXIO => Some(Self::Eunplugged),
+                23 | 1117 | libc::EIO => Some(Self::Eio),
+                _ => None,
+            }
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            match errno {
+                libc::ENOENT => Some(Self::Enoent),
+                libc::EPERM => Some(Self::Eperm),
+                libc::EACCES => Some(Self::Eacces),
+                libc::ENOMEM => Some(Self::Enomem),
+                libc::ENOSPC => Some(Self::Enospc),
+                libc::ENODEV | libc::ENXIO => Some(Self::Eunplugged),
+                libc::EIO => Some(Self::Eio),
+                _ => None,
+            }
         }
     }
 }
