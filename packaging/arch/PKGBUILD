@@ -1,0 +1,26 @@
+# Maintainer: Balena Ltd. <hello@balena.io>
+pkgname=balena-etcher
+pkgver=2.1.9
+pkgrel=1
+pkgdesc="Flash OS images to SD cards and USB drives, safely and easily."
+arch=('x86_64')
+url="https://etcher.balena.io/"
+license=('Apache-2.0')
+depends=('glibc' 'gcc-libs')
+optdepends=(
+  'polkit: privilege elevation for writing to block devices'
+  'libnotify: desktop notifications on flash completion'
+  'udisks2: automatic unmounting of target partitions'
+)
+options=('!strip' '!debug')
+
+package() {
+  install -dm755 "$pkgdir/usr/lib/$pkgname"
+  install -Dm755 "$srcdir/balena-etcher" "$pkgdir/usr/lib/$pkgname/balena-etcher"
+  install -Dm755 "$srcdir/etcher-util" "$pkgdir/usr/lib/$pkgname/etcher-util"
+  install -dm755 "$pkgdir/usr/bin"
+  ln -s "../lib/$pkgname/balena-etcher" "$pkgdir/usr/bin/balena-etcher"
+  install -Dm644 "$srcdir/balena-etcher.desktop" "$pkgdir/usr/share/applications/balena-etcher.desktop"
+  install -Dm644 "$srcdir/icon.png" "$pkgdir/usr/share/icons/hicolor/256x256/apps/balena-etcher.png"
+  install -Dm644 "$srcdir/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

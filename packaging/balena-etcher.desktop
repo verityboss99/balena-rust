@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=balenaEtcher
+Comment=Flash OS images to SD cards and USB drives, safely and easily.
+Exec=balena-etcher %U
+Terminal=false
+Type=Application
+Icon=balena-etcher
+StartupWMClass=balena-etcher
+Categories=Utility;System;
+Keywords=flash;usb;sd;image;iso;etcher;
+MimeType=application/x-raw-disk-image;application/x-iso9660-image;

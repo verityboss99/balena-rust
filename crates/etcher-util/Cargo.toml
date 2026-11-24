@@ -1,0 +1,20 @@
+[package]
+name = "etcher-util"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description.workspace = true
+
+[[bin]]
+name = "etcher-util"
+path = "src/main.rs"
+
+[dependencies]
+etcher-core = { path = "../etcher-core" }
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+flate2.workspace = true

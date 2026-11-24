@@ -1,0 +1,40 @@
+[package]
+name = "etcher-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description.workspace = true
+
+[features]
+default = ["writer"]
+writer = [
+    "dep:reqwest",
+    "dep:flate2",
+    "dep:bzip2",
+    "dep:xz2",
+    "dep:zstd",
+    "dep:zip",
+    "dep:xxhash-rust",
+    "dep:tempfile",
+    "dep:url",
+]
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+dirs.workspace = true
+libc.workspace = true
+reqwest = { workspace = true, optional = true }
+flate2 = { workspace = true, optional = true }
+bzip2 = { workspace = true, optional = true }
+xz2 = { workspace = true, optional = true }
+zstd = { workspace = true, optional = true }
+zip = { workspace = true, optional = true }
+xxhash-rust = { workspace = true, optional = true }
+url = { workspace = true, optional = true }
+tempfile = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile.workspace = true

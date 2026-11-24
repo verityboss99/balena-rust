@@ -1,0 +1,20 @@
+[package]
+name = "etcher-gui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description.workspace = true
+
+[[bin]]
+name = "balena-etcher"
+path = "src/main.rs"
+
+[dependencies]
+etcher-core = { path = "../etcher-core", default-features = false }
+iced.workspace = true
+tokio.workspace = true
+rfd.workspace = true
+open.workspace = true
+png.workspace = true
+serde_json.workspace = true
