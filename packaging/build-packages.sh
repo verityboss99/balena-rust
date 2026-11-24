@@ -99,7 +99,7 @@ install -m644 "$ROOT_DIR/LICENSE" "$ARCH_STAGE/src/LICENSE"
 
 (
     cd "$ARCH_STAGE"
-    PKGDEST="$DIST_DIR" BUILDDIR="$ARCH_STAGE/build" makepkg -f --noconfirm --nodeps
+    PKGDEST="$DIST_DIR" makepkg -f --noconfirm --nodeps
 )
 
 echo "=== 4. Packaging Windows 10+ 64-bit & 32-bit ZIPs ==="
