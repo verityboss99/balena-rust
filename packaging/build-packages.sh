@@ -4,7 +4,8 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DIST_DIR="$ROOT_DIR/dist"
 STAGE_DIR="$ROOT_DIR/target/packaging-stage"
-VERSION="2.1.9"
+VERSION="$(sed -n 's/^version = "\([^"]*\)"/\1/p' "$ROOT_DIR/Cargo.toml" | head -n1)"
+VERSION="${VERSION:-2.1.9}"
 
 ARCH_BIN_DIR="$ROOT_DIR/target/release"
 PORTABLE_BIN_DIR="$ROOT_DIR/target/x86_64-unknown-linux-gnu/release"
@@ -25,6 +26,7 @@ mkdir -p \
     "$DEB_ROOT/usr/bin" \
     "$DEB_ROOT/usr/share/applications" \
     "$DEB_ROOT/usr/share/icons/hicolor/256x256/apps" \
+    "$DEB_ROOT/usr/share/polkit-1/actions" \
     "$DEB_ROOT/usr/share/doc/balena-etcher"
 
 install -m755 "$PORTABLE_BIN_DIR/balena-etcher" "$DEB_ROOT/usr/lib/balena-etcher/balena-etcher"
@@ -32,6 +34,7 @@ install -m755 "$PORTABLE_BIN_DIR/etcher-util" "$DEB_ROOT/usr/lib/balena-etcher/e
 ln -s "../lib/balena-etcher/balena-etcher" "$DEB_ROOT/usr/bin/balena-etcher"
 install -m644 "$ROOT_DIR/packaging/balena-etcher.desktop" "$DEB_ROOT/usr/share/applications/balena-etcher.desktop"
 install -m644 "$ROOT_DIR/assets/icon.png" "$DEB_ROOT/usr/share/icons/hicolor/256x256/apps/balena-etcher.png"
+install -m644 "$ROOT_DIR/packaging/io.balena.etcher.policy" "$DEB_ROOT/usr/share/polkit-1/actions/io.balena.etcher.policy"
 install -m644 "$ROOT_DIR/LICENSE" "$DEB_ROOT/usr/share/doc/balena-etcher/copyright"
 
 INSTALLED_SIZE_KB="$(du -sk "$DEB_ROOT/usr" | awk '{print $1}')"
@@ -95,6 +98,7 @@ install -m755 "$ARCH_BIN_DIR/balena-etcher" "$ARCH_STAGE/src/balena-etcher"
 install -m755 "$ARCH_BIN_DIR/etcher-util" "$ARCH_STAGE/src/etcher-util"
 install -m644 "$ROOT_DIR/packaging/balena-etcher.desktop" "$ARCH_STAGE/src/balena-etcher.desktop"
 install -m644 "$ROOT_DIR/assets/icon.png" "$ARCH_STAGE/src/icon.png"
+install -m644 "$ROOT_DIR/packaging/io.balena.etcher.policy" "$ARCH_STAGE/src/io.balena.etcher.policy"
 install -m644 "$ROOT_DIR/LICENSE" "$ARCH_STAGE/src/LICENSE"
 
 (

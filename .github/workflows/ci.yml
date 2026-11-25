@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  linux:
+    name: Linux (x86_64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Check lightweight GUI core subset
+        run: cargo check -p etcher-core --no-default-features
+      - name: Run tests
+        run: cargo test --workspace
+      - name: Run clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Build release & smoke test
+        run: |
+          cargo build --workspace --release
+          ./target/release/balena-etcher --smoke-test
+
+  windows:
+    name: Windows (x64 + x86)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: i686-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+      - name: Run core tests
+        run: cargo test -p etcher-core
+      - name: Run clippy (x64)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Check 32-bit target (x86)
+        run: cargo check --workspace --target i686-pc-windows-msvc
+
+  macos:
+    name: macOS
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Run core tests
+        run: cargo test -p etcher-core
+      - name: Run clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings

@@ -63,13 +63,13 @@ impl ErrorCode {
         #[cfg(windows)]
         {
             match errno {
-                2 | 3 | libc::ENOENT => Some(Self::Enoent),
-                libc::EPERM => Some(Self::Eperm),
-                5 | libc::EACCES => Some(Self::Eacces),
-                8 | 14 | libc::ENOMEM => Some(Self::Enomem),
-                39 | 112 | libc::ENOSPC => Some(Self::Enospc),
-                21 | 1167 | libc::ENODEV | libc::ENXIO => Some(Self::Eunplugged),
-                23 | 1117 | libc::EIO => Some(Self::Eio),
+                2 | 3 => Some(Self::Enoent),
+                1 => Some(Self::Eperm),
+                5 | 19 => Some(Self::Eacces),
+                8 | 14 => Some(Self::Enomem),
+                39 | 112 => Some(Self::Enospc),
+                21 | 1167 => Some(Self::Eunplugged),
+                23 | 1117 => Some(Self::Eio),
                 _ => None,
             }
         }

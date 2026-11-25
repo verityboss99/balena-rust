@@ -310,8 +310,121 @@ fn unmount_drive_partitions_linux(device: &str) -> Result<(), EtcherError> {
 }
 
 #[cfg(target_os = "macos")]
-fn scan_drives_macos(_settings: &Settings) -> Result<Vec<Drive>, EtcherError> {
-    Ok(Vec::new())
+fn scan_drives_macos(settings: &Settings) -> Result<Vec<Drive>, EtcherError> {
+    use std::process::Command;
+
+    let list_out = Command::new("diskutil")
+        .args(["list"])
+        .output()
+        .map_err(|e| EtcherError::from_io_error(&e, Some("diskutil")))?;
+    if !list_out.status.success() {
+        return Ok(Vec::new());
+    }
+
+    let list_text = String::from_utf8_lossy(&list_out.stdout);
+    let mut disk_devs = Vec::new();
+    for line in list_text.lines() {
+        let trimmed = line.trim();
+        if let Some(dev) = trimmed.split_whitespace().next()
+            && dev.starts_with("/dev/disk")
+            && !disk_devs.iter().any(|d| d == dev)
+        {
+            disk_devs.push(dev.to_string());
+        }
+    }
+
+    let mut drives = Vec::new();
+    for dev in disk_devs {
+        if settings.drive_blacklist.iter().any(|b| b == &dev) {
+            continue;
+        }
+        let Ok(info_out) = Command::new("diskutil").args(["info", &dev]).output() else {
+            continue;
+        };
+        if !info_out.status.success() {
+            continue;
+        }
+        let info = String::from_utf8_lossy(&info_out.stdout);
+
+        let field = |key: &str| -> Option<String> {
+            info.lines().find_map(|l| {
+                let (k, v) = l.split_once(':')?;
+                if k.trim().eq_ignore_ascii_case(key) {
+                    Some(v.trim().to_string())
+                } else {
+                    None
+                }
+            })
+        };
+
+        let is_whole = field("Whole")
+            .map(|v| v.eq_ignore_ascii_case("Yes"))
+            .unwrap_or(false);
+        if !is_whole {
+            continue;
+        }
+
+        let size = field("Disk Size").and_then(|v| {
+            let start = v.find('(')?;
+            let rest = &v[start + 1..];
+            let num_str = rest.split_whitespace().next()?;
+            num_str.parse::<u64>().ok()
+        });
+        if size.unwrap_or(0) == 0 {
+            continue;
+        }
+
+        let protocol = field("Protocol").filter(|s| !s.is_empty());
+        let proto_upper = protocol.as_deref().unwrap_or_default().to_ascii_uppercase();
+        let is_usb = proto_upper == "USB";
+        let is_card = proto_upper.contains("SECURE DIGITAL") || proto_upper == "SD";
+        let is_removable = field("Removable Media")
+            .map(|v| v.eq_ignore_ascii_case("Removable") || v.eq_ignore_ascii_case("Yes"))
+            .unwrap_or(is_usb || is_card);
+        let is_virtual = field("Virtual")
+            .map(|v| v.eq_ignore_ascii_case("Yes"))
+            .unwrap_or(false);
+        let is_read_only = field("Read-Only Media")
+            .map(|v| v.eq_ignore_ascii_case("Yes"))
+            .unwrap_or(false);
+        let is_internal = field("Device Location")
+            .map(|v| v.eq_ignore_ascii_case("Internal"))
+            .unwrap_or(false);
+        let is_system = is_internal || (!is_removable && !is_virtual);
+
+        let partition_table_type = match field("Content (IOContent)").as_deref() {
+            Some("GUID_partition_scheme") => Some("gpt".to_string()),
+            Some("FDisk_partition_scheme") => Some("mbr".to_string()),
+            _ => None,
+        };
+
+        let description = field("Device / Media Name")
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| dev.clone());
+        let raw = dev.replacen("/dev/disk", "/dev/rdisk", 1);
+
+        drives.push(Drive {
+            device: dev.clone(),
+            raw,
+            device_path: field("Device Tree Path"),
+            display_name: dev,
+            description,
+            size,
+            is_removable,
+            is_system,
+            is_read_only,
+            is_usb,
+            is_card,
+            is_virtual,
+            bus_type: protocol,
+            mountpoints: Vec::new(),
+            partition_table_type,
+            disabled: is_read_only,
+            kind: DriveKind::BlockDevice,
+        });
+    }
+
+    Ok(drives)
 }
 
 #[cfg(target_os = "windows")]

@@ -1,0 +1,229 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v2.1.9)'
+        required: true
+        default: 'v2.1.9'
+
+permissions:
+  contents: write
+
+jobs:
+  build-linux:
+    name: Linux (.deb + .AppImage, glibc 2.31+)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install zig, cargo-zigbuild, and appimagetool
+        run: |
+          mkdir -p "$HOME/.local/bin" "$HOME/.local/tools/zig"
+          curl -fL -o /tmp/zig.tar.xz https://ziglang.org/download/0.17.1/zig-x86_64-linux-0.17.1.tar.xz
+          tar -xJf /tmp/zig.tar.xz --strip-components=1 -C "$HOME/.local/tools/zig"
+          ln -sf "$HOME/.local/tools/zig/zig" "$HOME/.local/bin/zig"
+          curl -fL -o /tmp/cargo-zigbuild.tar.xz https://github.com/rust-cross/cargo-zigbuild/releases/download/v0.24.1/cargo-zigbuild-x86_64-unknown-linux-gnu.tar.xz
+          tar -xJf /tmp/cargo-zigbuild.tar.xz -C /tmp
+          mv "$(find /tmp -maxdepth 3 -name cargo-zigbuild -type f | head -n1)" "$HOME/.local/bin/cargo-zigbuild"
+          chmod +x "$HOME/.local/bin/cargo-zigbuild"
+          curl -fL -o "$HOME/.local/bin/appimagetool" https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x "$HOME/.local/bin/appimagetool"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Build GLIBC 2.31 portable Linux binaries
+        run: |
+          cargo zigbuild --workspace --release --target x86_64-unknown-linux-gnu.2.31
+          ./target/x86_64-unknown-linux-gnu/release/balena-etcher --smoke-test
+
+      - name: Package .deb and .AppImage
+        run: |
+          VER="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n1)"
+          mkdir -p dist stage/deb/{DEBIAN,usr/lib/balena-etcher,usr/bin,usr/share/applications,usr/share/icons/hicolor/256x256/apps,usr/share/polkit-1/actions,usr/share/doc/balena-etcher}
+          install -m755 target/x86_64-unknown-linux-gnu/release/balena-etcher stage/deb/usr/lib/balena-etcher/balena-etcher
+          install -m755 target/x86_64-unknown-linux-gnu/release/etcher-util stage/deb/usr/lib/balena-etcher/etcher-util
+          ln -s ../lib/balena-etcher/balena-etcher stage/deb/usr/bin/balena-etcher
+          install -m644 packaging/balena-etcher.desktop stage/deb/usr/share/applications/balena-etcher.desktop
+          install -m644 assets/icon.png stage/deb/usr/share/icons/hicolor/256x256/apps/balena-etcher.png
+          install -m644 packaging/io.balena.etcher.policy stage/deb/usr/share/polkit-1/actions/io.balena.etcher.policy
+          install -m644 LICENSE stage/deb/usr/share/doc/balena-etcher/copyright
+          SIZE_KB="$(du -sk stage/deb/usr | awk '{print $1}')"
+          cat > stage/deb/DEBIAN/control <<EOF
+          Package: balena-etcher
+          Version: ${VER}
+          Architecture: amd64
+          Section: utils
+          Priority: optional
+          Installed-Size: ${SIZE_KB}
+          Depends: libc6 (>= 2.31), policykit-1 | pkexec, libnotify-bin | notification-daemon
+          Maintainer: Balena Ltd. <hello@balena.io>
+          Homepage: https://etcher.balena.io/
+          Description: Flash OS images to SD cards and USB drives, safely and easily.
+          EOF
+          (cd stage/deb && find usr -type f -print0 | xargs -0 md5sum > DEBIAN/md5sums)
+          dpkg-deb --build --root-owner-group stage/deb "dist/balena-etcher_${VER}_amd64.deb"
+
+          mkdir -p stage/AppDir/usr/{bin,share/applications,share/icons/hicolor/256x256/apps}
+          install -m755 target/x86_64-unknown-linux-gnu/release/balena-etcher stage/AppDir/usr/bin/balena-etcher
+          install -m755 target/x86_64-unknown-linux-gnu/release/etcher-util stage/AppDir/usr/bin/etcher-util
+          install -m644 packaging/balena-etcher.desktop stage/AppDir/balena-etcher.desktop
+          install -m644 packaging/balena-etcher.desktop stage/AppDir/usr/share/applications/balena-etcher.desktop
+          install -m644 assets/icon.png stage/AppDir/balena-etcher.png
+          install -m644 assets/icon.png stage/AppDir/usr/share/icons/hicolor/256x256/apps/balena-etcher.png
+          printf '#!/bin/sh\nHERE="$(dirname "$(readlink -f "$0")")"\nexec "$HERE/usr/bin/balena-etcher" "$@"\n' > stage/AppDir/AppRun
+          chmod 0755 stage/AppDir/AppRun
+          ARCH=x86_64 appimagetool --appimage-extract-and-run stage/AppDir "dist/balenaEtcher-${VER}-x86_64.AppImage"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-bins
+          path: |
+            target/x86_64-unknown-linux-gnu/release/balena-etcher
+            target/x86_64-unknown-linux-gnu/release/etcher-util
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-linux
+          path: dist/*
+
+  build-arch:
+    name: Arch Linux (.pkg.tar.zst)
+    runs-on: ubuntu-latest
+    needs: build-linux
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-bins
+          path: arch-bins
+      - name: Build Arch package in container
+        run: |
+          mkdir -p dist arch-stage/src
+          cp packaging/arch/PKGBUILD arch-stage/PKGBUILD
+          install -m755 arch-bins/balena-etcher arch-stage/src/balena-etcher
+          install -m755 arch-bins/etcher-util arch-stage/src/etcher-util
+          install -m644 packaging/balena-etcher.desktop arch-stage/src/balena-etcher.desktop
+          install -m644 assets/icon.png arch-stage/src/icon.png
+          install -m644 packaging/io.balena.etcher.policy arch-stage/src/io.balena.etcher.policy
+          install -m644 LICENSE arch-stage/src/LICENSE
+          chmod -R a+rwX arch-stage dist
+          docker run --rm -v "$PWD/arch-stage:/work" -v "$PWD/dist:/out" archlinux:base-devel bash -c '
+            useradd -m builder
+            chown -R builder:builder /work /out
+            su - builder -c "cd /work && PKGDEST=/out makepkg -f --noconfirm --nodeps"
+          '
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-arch
+          path: dist/*.pkg.tar.zst
+
+  build-windows:
+    name: Windows (${{ matrix.arch }})
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        include:
+          - arch: x64
+            target: x86_64-pc-windows-msvc
+          - arch: x86
+            target: i686-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Build Windows release binaries
+        run: cargo build --workspace --release --target ${{ matrix.target }}
+      - name: Package portable ZIP and NSIS installer
+        shell: pwsh
+        run: |
+          $ver = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1).Matches.Groups[1].Value
+          $binDir = "target\${{ matrix.target }}\release"
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+
+          $bundle = "balenaEtcher-$ver-win10-${{ matrix.arch }}"
+          New-Item -ItemType Directory -Force -Path "stage\$bundle" | Out-Null
+          Copy-Item "$binDir\balena-etcher.exe", "$binDir\etcher-util.exe", "LICENSE" "stage\$bundle\"
+          Compress-Archive -Path "stage\$bundle" -DestinationPath "dist\$bundle.zip" -CompressionLevel Optimal -Force
+
+          makensis /DVERSION=$ver /DARCH=${{ matrix.arch }} /DBIN_DIR="$PWD\$binDir" /DOUT_FILE="$PWD\dist\$bundle-setup.exe" /DICON_PATH="$PWD\assets\icon.ico" /DLICENSE_PATH="$PWD\LICENSE" packaging\windows\installer.nsi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-windows-${{ matrix.arch }}
+          path: dist/*
+
+  build-macos:
+    name: macOS (${{ matrix.arch }})
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        include:
+          - arch: arm64
+            target: aarch64-apple-darwin
+          - arch: x64
+            target: x86_64-apple-darwin
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Build macOS release binaries
+        run: cargo build --workspace --release --target ${{ matrix.target }}
+      - name: Package .dmg
+        run: |
+          VER="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n1)"
+          APP="stage/balenaEtcher.app"
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" dist
+          cp "target/${{ matrix.target }}/release/balena-etcher" "$APP/Contents/MacOS/balena-etcher"
+          cp "target/${{ matrix.target }}/release/etcher-util" "$APP/Contents/MacOS/etcher-util"
+          cp assets/icon.icns "$APP/Contents/Resources/icon.icns"
+          cat > "$APP/Contents/Info.plist" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleExecutable</key><string>balena-etcher</string>
+            <key>CFBundleIconFile</key><string>icon.icns</string>
+            <key>CFBundleIdentifier</key><string>io.balena.etcher</string>
+            <key>CFBundleName</key><string>balenaEtcher</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleShortVersionString</key><string>${VER}</string>
+            <key>NSHighResolutionCapable</key><true/>
+          </dict>
+          </plist>
+          EOF
+          hdiutil create -volname "balenaEtcher" -srcfolder "$APP" -ov -format UDZO "dist/balenaEtcher-${VER}-macos-${{ matrix.arch }}.dmg"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-macos-${{ matrix.arch }}
+          path: dist/*.dmg
+
+  publish:
+    name: Publish GitHub Release
+    runs-on: ubuntu-latest
+    needs: [build-linux, build-arch, build-windows, build-macos]
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: all-artifacts
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ inputs.tag || github.ref_name }}"
+          mkdir -p upload
+          find all-artifacts -type f -exec mv -t upload {} +
+          (cd upload && sha256sum * > SHA256SUMS.txt)
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" upload/* --clobber
+          else
+            gh release create "$TAG" upload/* --title "balena-rust $TAG" --generate-notes
+          fi

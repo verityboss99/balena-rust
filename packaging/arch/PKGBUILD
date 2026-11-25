@@ -22,5 +22,6 @@ package() {
   ln -s "../lib/$pkgname/balena-etcher" "$pkgdir/usr/bin/balena-etcher"
   install -Dm644 "$srcdir/balena-etcher.desktop" "$pkgdir/usr/share/applications/balena-etcher.desktop"
   install -Dm644 "$srcdir/icon.png" "$pkgdir/usr/share/icons/hicolor/256x256/apps/balena-etcher.png"
+  install -Dm644 "$srcdir/io.balena.etcher.policy" "$pkgdir/usr/share/polkit-1/actions/io.balena.etcher.policy"
   install -Dm644 "$srcdir/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
 }
