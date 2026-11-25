@@ -15,6 +15,34 @@ pub struct ProbeRequest {
     pub auth: Option<Authentication>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateCheckResult {
+    pub current_version: String,
+    pub latest_version: String,
+    pub html_url: String,
+    pub update_available: bool,
+}
+
+pub fn is_newer_version(current: &str, latest: &str) -> bool {
+    let parse = |s: &str| -> Vec<u64> {
+        s.trim()
+            .trim_start_matches(['v', 'V'])
+            .split('-')
+            .next()
+            .unwrap_or("")
+            .split('.')
+            .map(|p| p.parse::<u64>().unwrap_or(0))
+            .collect()
+    };
+    let mut a = parse(current);
+    let mut b = parse(latest);
+    let len = a.len().max(b.len());
+    a.resize(len, 0);
+    b.resize(len, 0);
+    b > a
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "payload", rename_all = "camelCase")]
 pub enum UtilToGui {
@@ -210,4 +238,19 @@ fn spawn_privileged_windows(util_path: &Path, args: &[String]) -> Result<SpawnOu
         .spawn()
         .map_err(|e| EtcherError::from_io_error(&e, Some("powershell.exe")))?;
     Ok(SpawnOutcome::Spawned(child))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_newer_version;
+
+    #[test]
+    fn test_is_newer_version() {
+        assert!(is_newer_version("2.1.9", "2.1.10"));
+        assert!(is_newer_version("2.1.9", "v2.2.0"));
+        assert!(is_newer_version("2.1.9", "3.0.0"));
+        assert!(!is_newer_version("2.1.9", "v2.1.9"));
+        assert!(!is_newer_version("2.1.10", "2.1.9"));
+        assert!(!is_newer_version("2.2.0", "2.1.99"));
+    }
 }

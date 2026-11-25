@@ -15,6 +15,7 @@ pub enum CompressionFormat {
     Xz,
     Zstd,
     Zip,
+    SevenZip,
     Dmg,
 }
 
@@ -27,6 +28,7 @@ impl CompressionFormat {
             Self::Xz => Some("xz"),
             Self::Zstd => Some("zst"),
             Self::Zip => Some("zip"),
+            Self::SevenZip => Some("7z"),
             Self::Dmg => Some("dmg"),
         }
     }
@@ -51,6 +53,9 @@ pub fn detect_format(magic: &[u8], path: &str) -> CompressionFormat {
     }
     if magic.len() >= 4 && magic[..4] == [0x50, 0x4B, 0x03, 0x04] {
         return CompressionFormat::Zip;
+    }
+    if magic.len() >= 6 && magic[..6] == [0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C] {
+        return CompressionFormat::SevenZip;
     }
     if path.to_ascii_lowercase().ends_with(".dmg") {
         return CompressionFormat::Dmg;
@@ -90,6 +95,7 @@ fn probe_file_metadata(path_str: &str) -> Result<SourceMetadata, EtcherError> {
     let mut compressed_size: Option<u64> = None;
     let mut is_size_estimated = false;
     let mut inner_name: Option<String> = None;
+    let mut is_compressed_override: Option<bool> = None;
 
     match format {
         CompressionFormat::None => {
@@ -157,14 +163,51 @@ fn probe_file_metadata(path_str: &str) -> Result<SourceMetadata, EtcherError> {
             let read_n = read_up_to(&mut entry, &mut header)?;
             header.truncate(read_n);
         }
+        CompressionFormat::SevenZip => {
+            compressed_size = Some(file_len);
+            let mut archive = sevenz_rust2::ArchiveReader::new(
+                BufReader::new(file),
+                sevenz_rust2::Password::empty(),
+            )
+            .map_err(|e| EtcherError::new("Invalid 7z archive", e.to_string()))?;
+            let (target_name, target_size) = select_primary_7z_entry(archive.archive())?;
+            size = Some(target_size);
+            inner_name = Some(
+                Path::new(&target_name)
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or(&target_name)
+                    .to_string(),
+            );
+            let mut read_n = 0;
+            archive
+                .for_each_entries(|entry, reader| {
+                    if !entry.is_directory && entry.name == target_name {
+                        read_n = read_up_to(reader, &mut header)?;
+                        return Ok(false);
+                    }
+                    Ok(true)
+                })
+                .map_err(|e| EtcherError::new("Failed reading 7z entry", e.to_string()))?;
+            header.truncate(read_n);
+        }
         CompressionFormat::Dmg => {
-            return Err(EtcherError::user_error(
-                "DMG inspection not supported",
-                "Please convert the DMG image to a raw .img or .iso before flashing.",
-            ));
+            if crate::dmg::is_udif_dmg(&mut file) {
+                compressed_size = Some(file_len);
+                let mut dmg = crate::dmg::DmgReader::open(BufReader::new(file))?;
+                size = Some(dmg.uncompressed_size());
+                let read_n = read_up_to(&mut dmg, &mut header)?;
+                header.truncate(read_n);
+            } else {
+                is_compressed_override = Some(false);
+                size = Some(file_len);
+                let read_n = read_up_to(&mut file, &mut header)?;
+                header.truncate(read_n);
+            }
         }
     }
 
+    let is_compressed = is_compressed_override.unwrap_or_else(|| format.is_compressed());
     let (has_mbr, partitions) = inspect_partition_table(&header);
     let file_name = path
         .file_name()
@@ -190,12 +233,16 @@ fn probe_file_metadata(path_str: &str) -> Result<SourceMetadata, EtcherError> {
         partitions,
         source_type: SourceType::File,
         extension,
-        archive_extension: format.archive_extension().map(ToString::to_string),
+        archive_extension: if is_compressed {
+            format.archive_extension().map(ToString::to_string)
+        } else {
+            None
+        },
         drive: None,
         auth: None,
         logo: None,
         support_url: None,
-        is_compressed: format.is_compressed(),
+        is_compressed,
         blockmapped_size: None,
     })
 }
@@ -443,6 +490,39 @@ pub fn open_source_for_write(image: &SourceMetadata) -> Result<OpenedSource, Etc
                 });
             }
 
+            if format == CompressionFormat::SevenZip {
+                let archive = sevenz_rust2::ArchiveReader::new(
+                    BufReader::new(file),
+                    sevenz_rust2::Password::empty(),
+                )
+                .map_err(|e| EtcherError::new("Invalid 7z archive", e.to_string()))?;
+                let sz_reader = OwnedSevenZipEntryReader::new(archive)?;
+                let uncompressed_size = Some(sz_reader.entry_size);
+                return Ok(OpenedSource::Stream {
+                    reader: Box::new(sz_reader),
+                    compressed_bytes_read: None,
+                    compressed_total: Some(file_len),
+                    uncompressed_size,
+                });
+            }
+
+            if format == CompressionFormat::Dmg {
+                if crate::dmg::is_udif_dmg(&mut file) {
+                    let dmg = crate::dmg::DmgReader::open(BufReader::new(file))?;
+                    let uncompressed_size = Some(dmg.uncompressed_size());
+                    return Ok(OpenedSource::Stream {
+                        reader: Box::new(dmg),
+                        compressed_bytes_read: None,
+                        compressed_total: Some(file_len),
+                        uncompressed_size,
+                    });
+                }
+                return Ok(OpenedSource::RawSeekable {
+                    file,
+                    size: Some(file_len),
+                });
+            }
+
             let counter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
             let counting = CountingReader {
                 inner: BufReader::new(file),
@@ -458,12 +538,6 @@ pub fn open_source_for_write(image: &SourceMetadata) -> Result<OpenedSource, Etc
                     zstd::stream::read::Decoder::new(counting)
                         .map_err(|e| EtcherError::new("Invalid zstd stream", e.to_string()))?,
                 ),
-                CompressionFormat::Dmg => {
-                    return Err(EtcherError::user_error(
-                        "DMG format unsupported",
-                        "Please extract the DMG to .img/.iso before flashing.",
-                    ));
-                }
                 _ => unreachable!(),
             };
 
@@ -520,6 +594,48 @@ pub fn open_source_for_write(image: &SourceMetadata) -> Result<OpenedSource, Etc
                 });
             }
 
+            if format == CompressionFormat::SevenZip {
+                let mut tmp = tempfile::NamedTempFile::new()
+                    .map_err(|e| EtcherError::from_io_error(&e, None))?;
+                std::io::copy(&mut chained, &mut tmp)?;
+                tmp.seek(SeekFrom::Start(0))?;
+                let archive = sevenz_rust2::ArchiveReader::new(
+                    BufReader::new(tmp.reopen()?),
+                    sevenz_rust2::Password::empty(),
+                )
+                .map_err(|e| EtcherError::new("Invalid 7z archive", e.to_string()))?;
+                let sz_reader = OwnedSevenZipEntryReader::new(archive)?;
+                let sz = sz_reader.entry_size;
+                return Ok(OpenedSource::Stream {
+                    reader: Box::new(sz_reader),
+                    compressed_bytes_read: None,
+                    compressed_total: total,
+                    uncompressed_size: Some(sz),
+                });
+            }
+
+            if format == CompressionFormat::Dmg {
+                let mut tmp = tempfile::NamedTempFile::new()
+                    .map_err(|e| EtcherError::from_io_error(&e, None))?;
+                std::io::copy(&mut chained, &mut tmp)?;
+                let mut reopened = tmp.reopen()?;
+                if crate::dmg::is_udif_dmg(&mut reopened) {
+                    let dmg = crate::dmg::DmgReader::open(BufReader::new(reopened))?;
+                    let sz = dmg.uncompressed_size();
+                    return Ok(OpenedSource::Stream {
+                        reader: Box::new(dmg),
+                        compressed_bytes_read: None,
+                        compressed_total: total,
+                        uncompressed_size: Some(sz),
+                    });
+                }
+                let raw_sz = reopened.metadata().ok().map(|m| m.len());
+                return Ok(OpenedSource::RawSeekable {
+                    file: reopened,
+                    size: raw_sz,
+                });
+            }
+
             let reader: Box<dyn Read + Send> = match format {
                 CompressionFormat::None => Box::new(chained),
                 CompressionFormat::Gzip => Box::new(flate2::read::MultiGzDecoder::new(chained)),
@@ -531,13 +647,9 @@ pub fn open_source_for_write(image: &SourceMetadata) -> Result<OpenedSource, Etc
                     zstd::stream::read::Decoder::new(chained)
                         .map_err(|e| EtcherError::new("Invalid zstd stream", e.to_string()))?,
                 ),
-                CompressionFormat::Dmg => {
-                    return Err(EtcherError::user_error(
-                        "DMG format unsupported",
-                        "DMG over HTTP cannot be flashed directly.",
-                    ));
+                CompressionFormat::Zip | CompressionFormat::SevenZip | CompressionFormat::Dmg => {
+                    unreachable!()
                 }
-                CompressionFormat::Zip => unreachable!(),
             };
 
             Ok(OpenedSource::Stream {
@@ -651,7 +763,151 @@ impl Read for OwnedZipEntryReader {
         Ok(to_copy)
     }
 }
-fn read_up_to<R: Read>(reader: &mut R, buf: &mut [u8]) -> std::io::Result<usize> {
+
+fn select_primary_7z_entry(archive: &sevenz_rust2::Archive) -> Result<(String, u64), EtcherError> {
+    let mut best: Option<(String, u64, bool)> = None;
+    for entry in &archive.files {
+        if entry.is_directory {
+            continue;
+        }
+        let name = entry.name.as_str();
+        if name.starts_with("__MACOSX") || name.split('/').any(|p| p.starts_with('.')) {
+            continue;
+        }
+        let lower = name.to_ascii_lowercase();
+        let is_img = lower.ends_with(".img")
+            || lower.ends_with(".iso")
+            || lower.ends_with(".raw")
+            || lower.ends_with(".bin")
+            || lower.ends_with(".wic")
+            || lower.ends_with(".sdcard");
+        let sz = entry.size;
+        match &best {
+            None => best = Some((name.to_string(), sz, is_img)),
+            Some((_, best_sz, best_img)) => {
+                if (is_img && !best_img) || (is_img == *best_img && sz > *best_sz) {
+                    best = Some((name.to_string(), sz, is_img));
+                }
+            }
+        }
+    }
+    best.map(|(n, s, _)| (n, s))
+        .ok_or_else(|| EtcherError::user_error("Empty 7z archive", "No image file found in 7z."))
+}
+
+struct OwnedSevenZipEntryReader {
+    entry_size: u64,
+    rx: std::sync::mpsc::Receiver<std::io::Result<Vec<u8>>>,
+    current_chunk: Vec<u8>,
+    chunk_pos: usize,
+}
+
+impl OwnedSevenZipEntryReader {
+    fn new<R: Read + Seek + Send + 'static>(
+        mut archive: sevenz_rust2::ArchiveReader<R>,
+    ) -> Result<Self, EtcherError> {
+        let (target_name, entry_size) = select_primary_7z_entry(archive.archive())?;
+        let (tx, rx) = std::sync::mpsc::sync_channel::<std::io::Result<Vec<u8>>>(8);
+        std::thread::spawn(move || {
+            let res = archive.for_each_entries(|entry, reader| {
+                if !entry.is_directory && entry.name == target_name {
+                    let mut buf = vec![0u8; 256 * 1024];
+                    loop {
+                        match reader.read(&mut buf) {
+                            Ok(0) => break,
+                            Ok(n) => {
+                                if tx.send(Ok(buf[..n].to_vec())).is_err() {
+                                    return Ok(false);
+                                }
+                            }
+                            Err(e) => {
+                                let _ = tx.send(Err(e));
+                                return Ok(false);
+                            }
+                        }
+                    }
+                    return Ok(false);
+                }
+                Ok(true)
+            });
+            if let Err(e) = res {
+                let _ = tx.send(Err(std::io::Error::other(e.to_string())));
+            }
+        });
+        Ok(Self {
+            entry_size,
+            rx,
+            current_chunk: Vec::new(),
+            chunk_pos: 0,
+        })
+    }
+}
+
+impl Read for OwnedSevenZipEntryReader {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        if self.chunk_pos >= self.current_chunk.len() {
+            match self.rx.recv() {
+                Ok(Ok(chunk)) => {
+                    self.current_chunk = chunk;
+                    self.chunk_pos = 0;
+                }
+                Ok(Err(e)) => return Err(e),
+                Err(_) => return Ok(0),
+            }
+        }
+        let avail = &self.current_chunk[self.chunk_pos..];
+        let to_copy = avail.len().min(out.len());
+        out[..to_copy].copy_from_slice(&avail[..to_copy]);
+        self.chunk_pos += to_copy;
+        Ok(to_copy)
+    }
+}
+
+pub fn check_latest_github_release() -> Result<crate::ipc::UpdateCheckResult, EtcherError> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .user_agent(concat!("balena-rust/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|e| EtcherError::new("Failed to initialize HTTP client", e.to_string()))?;
+
+    let resp = client
+        .get("https://api.github.com/repos/verityboss99/balena-rust/releases/latest")
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .map_err(|e| EtcherError::new("Update check failed", e.to_string()))?;
+
+    if !resp.status().is_success() {
+        return Err(EtcherError::new(
+            format!("Update check failed ({})", resp.status().as_u16()),
+            format!("GitHub API returned {}", resp.status()),
+        ));
+    }
+
+    let body: serde_json::Value = resp
+        .json()
+        .map_err(|e| EtcherError::new("Invalid release response", e.to_string()))?;
+    let tag_name = body
+        .get("tag_name")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| EtcherError::new("Invalid release response", "Missing tag_name"))?;
+    let html_url = body
+        .get("html_url")
+        .and_then(|v| v.as_str())
+        .unwrap_or("https://github.com/verityboss99/balena-rust/releases")
+        .to_string();
+
+    let current_version = env!("CARGO_PKG_VERSION").to_string();
+    let latest_version = tag_name.trim().trim_start_matches(['v', 'V']).to_string();
+    let update_available = crate::ipc::is_newer_version(&current_version, &latest_version);
+
+    Ok(crate::ipc::UpdateCheckResult {
+        current_version,
+        latest_version,
+        html_url,
+        update_available,
+    })
+}
+fn read_up_to<R: Read + ?Sized>(reader: &mut R, buf: &mut [u8]) -> std::io::Result<usize> {
     let mut total = 0;
     while total < buf.len() {
         match reader.read(&mut buf[total..]) {
@@ -876,6 +1132,127 @@ mod tests {
             assert_eq!(out, raw_data);
         } else {
             panic!("expected stream");
+        }
+    }
+
+    #[test]
+    fn test_udif_dmg_probe_and_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let dmg_path = dir.path().join("test.dmg");
+
+        let s0 = sample_mbr_image(512);
+        let s1 = vec![0u8; 512];
+        let s2 = vec![0x3Cu8; 512];
+        let s3 = vec![0x7Eu8; 512];
+
+        let mut z_enc = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        z_enc.write_all(&s2).unwrap();
+        let z_bytes = z_enc.finish().unwrap();
+
+        let mut bz_enc = bzip2::write::BzEncoder::new(Vec::new(), bzip2::Compression::default());
+        bz_enc.write_all(&s3).unwrap();
+        let bz_bytes = bz_enc.finish().unwrap();
+
+        let mut data_fork = Vec::new();
+        let off0 = data_fork.len() as u64;
+        data_fork.extend_from_slice(&s0);
+        let off2 = data_fork.len() as u64;
+        data_fork.extend_from_slice(&z_bytes);
+        let off3 = data_fork.len() as u64;
+        data_fork.extend_from_slice(&bz_bytes);
+
+        let mut mish = vec![0u8; 204 + 5 * 40];
+        mish[0..4].copy_from_slice(b"mish");
+        mish[200..204].copy_from_slice(&5u32.to_be_bytes());
+        let mut put_entry = |idx: usize, kind: u32, sec: u64, cnt: u64, off: u64, len: u64| {
+            let e = &mut mish[204 + idx * 40..204 + (idx + 1) * 40];
+            e[0..4].copy_from_slice(&kind.to_be_bytes());
+            e[8..16].copy_from_slice(&sec.to_be_bytes());
+            e[16..24].copy_from_slice(&cnt.to_be_bytes());
+            e[24..32].copy_from_slice(&off.to_be_bytes());
+            e[32..40].copy_from_slice(&len.to_be_bytes());
+        };
+        put_entry(0, 0x0000_0001, 0, 1, off0, s0.len() as u64);
+        put_entry(1, 0x0000_0000, 1, 1, 0, 0);
+        put_entry(2, 0x8000_0005, 2, 1, off2, z_bytes.len() as u64);
+        put_entry(3, 0x8000_0006, 3, 1, off3, bz_bytes.len() as u64);
+        put_entry(4, 0xFFFF_FFFF, 4, 0, 0, 0);
+
+        const B64: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut b64 = String::new();
+        for chunk in mish.chunks(3) {
+            let b0 = chunk[0] as usize;
+            let b1 = *chunk.get(1).unwrap_or(&0) as usize;
+            let b2 = *chunk.get(2).unwrap_or(&0) as usize;
+            let n = (b0 << 16) | (b1 << 8) | b2;
+            b64.push(B64[(n >> 18) & 63] as char);
+            b64.push(B64[(n >> 12) & 63] as char);
+            b64.push(if chunk.len() > 1 { B64[(n >> 6) & 63] as char } else { '=' });
+            b64.push(if chunk.len() > 2 { B64[n & 63] as char } else { '=' });
+        }
+
+        let plist = format!(
+            "<plist><dict><key>resource-fork</key><dict><key>blkx</key><array><dict><key>Data</key><data>{b64}</data></dict></array></dict></dict></plist>"
+        );
+        let xml_offset = data_fork.len() as u64;
+        let xml_bytes = plist.as_bytes();
+        let xml_length = xml_bytes.len() as u64;
+
+        let mut koly = [0u8; 512];
+        koly[0..4].copy_from_slice(b"koly");
+        koly[216..224].copy_from_slice(&xml_offset.to_be_bytes());
+        koly[224..232].copy_from_slice(&xml_length.to_be_bytes());
+        koly[492..500].copy_from_slice(&4u64.to_be_bytes());
+
+        let mut file_bytes = data_fork;
+        file_bytes.extend_from_slice(xml_bytes);
+        file_bytes.extend_from_slice(&koly);
+        std::fs::write(&dmg_path, &file_bytes).unwrap();
+
+        let meta = probe_source_metadata(dmg_path.to_str().unwrap(), SourceType::File, None).unwrap();
+        assert!(meta.has_mbr);
+        assert!(meta.is_compressed);
+        assert_eq!(meta.archive_extension.as_deref(), Some("dmg"));
+        assert_eq!(meta.size, Some(2048));
+
+        if let OpenedSource::Stream { mut reader, .. } = open_source_for_write(&meta).unwrap() {
+            let mut out = Vec::new();
+            reader.read_to_end(&mut out).unwrap();
+            let mut expected = Vec::new();
+            expected.extend_from_slice(&s0);
+            expected.extend_from_slice(&s1);
+            expected.extend_from_slice(&s2);
+            expected.extend_from_slice(&s3);
+            assert_eq!(out, expected);
+        } else {
+            panic!("expected stream for UDIF DMG");
+        }
+    }
+
+    #[test]
+    fn test_sevenz_probe_and_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let raw_data = sample_mbr_image(8192);
+        let sz_path = dir.path().join("test.7z");
+        {
+            let mut writer = sevenz_rust2::ArchiveWriter::new(File::create(&sz_path).unwrap()).unwrap();
+            let entry = sevenz_rust2::ArchiveEntry::new_file("os/test.img");
+            writer
+                .push_archive_entry(entry, Some(std::io::Cursor::new(&raw_data)))
+                .unwrap();
+            writer.finish().unwrap();
+        }
+        let meta = probe_source_metadata(sz_path.to_str().unwrap(), SourceType::File, None).unwrap();
+        assert!(meta.has_mbr);
+        assert!(meta.is_compressed);
+        assert_eq!(meta.archive_extension.as_deref(), Some("7z"));
+        assert_eq!(meta.size, Some(8192));
+        if let OpenedSource::Stream { mut reader, .. } = open_source_for_write(&meta).unwrap() {
+            let mut out = Vec::new();
+            reader.read_to_end(&mut out).unwrap();
+            assert_eq!(out, raw_data);
+        } else {
+            panic!("expected stream for 7z");
         }
     }
 }

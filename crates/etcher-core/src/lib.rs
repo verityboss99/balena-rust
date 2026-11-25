@@ -1,3 +1,5 @@
+#[cfg(feature = "writer")]
+pub mod dmg;
 pub mod drive_constraints;
 pub mod drives;
 pub mod errors;

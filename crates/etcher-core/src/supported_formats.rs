@@ -1,6 +1,7 @@
 use std::path::Path;
 
 pub const SUPPORTED_EXTENSIONS: &[&str] = &[
+    "7z",
     "bin",
     "bz2",
     "dmg",

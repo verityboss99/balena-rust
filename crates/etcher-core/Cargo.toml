@@ -15,6 +15,7 @@ writer = [
     "dep:xz2",
     "dep:zstd",
     "dep:zip",
+    "dep:sevenz-rust2",
     "dep:xxhash-rust",
     "dep:tempfile",
     "dep:url",
@@ -32,9 +33,11 @@ bzip2 = { workspace = true, optional = true }
 xz2 = { workspace = true, optional = true }
 zstd = { workspace = true, optional = true }
 zip = { workspace = true, optional = true }
+sevenz-rust2 = { workspace = true, optional = true }
 xxhash-rust = { workspace = true, optional = true }
 url = { workspace = true, optional = true }
 tempfile = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile.workspace = true
+sevenz-rust2 = { version = "0.25", default-features = false, features = ["compress"] }

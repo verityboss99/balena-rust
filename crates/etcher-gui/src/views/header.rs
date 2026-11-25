@@ -1,11 +1,16 @@
-use iced::widget::{button, row, space, svg};
+use iced::widget::{button, row, space, svg, text};
 use iced::{Alignment, Color, Element, Length};
+
+use etcher_core::ipc::UpdateCheckResult;
 
 use crate::app::Message;
 use crate::icons;
-use crate::theme::{self, TEXT_HOVER_MUTED};
+use crate::theme::{self, FONT_SEMIBOLD, TEXT_HOVER_MUTED};
 
-pub fn view(disable_external_links: bool) -> Element<'static, Message> {
+pub fn view<'a>(
+    disable_external_links: bool,
+    update_info: Option<&'a UpdateCheckResult>,
+) -> Element<'a, Message> {
     let logo_btn = button(svg(icons::etcher_logo()).width(123).height(22))
         .padding(0)
         .style(theme::plain_button(Color::WHITE, TEXT_HOVER_MUTED))
@@ -40,8 +45,30 @@ pub fn view(disable_external_links: bool) -> Element<'static, Message> {
         right = right.push(help_btn);
     }
 
+    let left: Element<'a, Message> = if !disable_external_links
+        && let Some(info) = update_info
+        && info.update_available
+    {
+        iced::widget::container(
+            button(
+                text(format!("Update v{}", info.latest_version))
+                    .font(FONT_SEMIBOLD)
+                    .size(11)
+                    .color(Color::WHITE),
+            )
+            .padding([3, 10])
+            .style(theme::primary_pill_button)
+            .on_press(Message::OpenExternal(info.html_url.clone())),
+        )
+        .width(Length::FillPortion(1))
+        .padding([0, 16])
+        .into()
+    } else {
+        space().width(Length::FillPortion(1)).into()
+    };
+
     row![
-        space().width(Length::FillPortion(1)),
+        left,
         iced::widget::container(logo_btn)
             .width(Length::FillPortion(1))
             .center_x(Length::Fill),

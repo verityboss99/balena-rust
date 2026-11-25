@@ -6,8 +6,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use etcher_core::errors::EtcherError;
-use etcher_core::ipc::{GuiToUtil, ProbeRequest, UtilToGui};
-use etcher_core::source::probe_source_metadata;
+use etcher_core::ipc::{GuiToUtil, ProbeRequest, UpdateCheckResult, UtilToGui};
+use etcher_core::source::{check_latest_github_release, probe_source_metadata};
 use etcher_core::types::SourceMetadata;
 use etcher_core::writer::{cleanup_tmp_files, write_and_validate};
 
@@ -72,9 +72,24 @@ fn run_probe_mode() -> ExitCode {
     ExitCode::SUCCESS
 }
 
+fn run_check_update_mode() -> ExitCode {
+    let result: Result<UpdateCheckResult, EtcherError> = check_latest_github_release();
+    let Ok(json) = serde_json::to_string(&result) else {
+        return ExitCode::from(1);
+    };
+    let mut stdout = std::io::stdout().lock();
+    if writeln!(stdout, "{json}").is_err() || stdout.flush().is_err() {
+        return ExitCode::from(1);
+    }
+    ExitCode::SUCCESS
+}
+
 fn main() -> ExitCode {
     if std::env::args().any(|a| a == "--probe") {
         return run_probe_mode();
+    }
+    if std::env::args().any(|a| a == "--check-update") {
+        return run_check_update_mode();
     }
 
     let args = match parse_args() {

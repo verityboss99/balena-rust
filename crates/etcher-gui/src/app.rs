@@ -19,8 +19,8 @@ use etcher_core::i18n::{
     msg_missing_partition_table, msg_open_source, title_from_flash_state,
 };
 use etcher_core::ipc::{
-    GuiToUtil, ProbeRequest, SpawnOutcome, UtilToGui, find_util_binary, generate_auth_token,
-    spawn_util_process,
+    GuiToUtil, ProbeRequest, SpawnOutcome, UpdateCheckResult, UtilToGui, find_util_binary,
+    generate_auth_token, spawn_util_process,
 };
 use etcher_core::leds::{LedController, LedStep};
 use etcher_core::settings::Settings;
@@ -137,6 +137,9 @@ pub enum Message {
     ToggleErrorReporting(bool),
     ToggleAutoBlockmapping(bool),
     ToggleDesktopNotifications(bool),
+    ToggleAutoUpdates(bool),
+    CheckForUpdates,
+    UpdateChecked(Result<UpdateCheckResult, EtcherError>),
     SetLocale(Locale),
     OpenSupportUrl,
     OpenExternal(String),
@@ -163,6 +166,9 @@ pub struct EtcherApp {
     pub leds: LedController,
     pub active_flash_cmd_tx: Option<mpsc::UnboundedSender<GuiToUtil>>,
     pub active_flash_sub: Option<FlashSubscriptionHandle>,
+    pub update_info: Option<UpdateCheckResult>,
+    pub checking_updates: bool,
+    pub update_error: Option<String>,
     next_flash_id: u64,
 }
 
@@ -181,6 +187,7 @@ impl EtcherApp {
             store.set_available_drives(drives, &settings);
         }
 
+        let checking_updates = settings.updates_enabled;
         let app = Self {
             store,
             settings,
@@ -194,6 +201,9 @@ impl EtcherApp {
             leds,
             active_flash_cmd_tx: None,
             active_flash_sub: None,
+            update_info: None,
+            checking_updates,
+            update_error: None,
             next_flash_id: 1,
         };
 
@@ -204,6 +214,17 @@ impl EtcherApp {
             },
             Message::DrivesUpdated,
         )];
+
+        if app.settings.updates_enabled {
+            tasks.push(Task::perform(
+                async move {
+                    tokio::task::spawn_blocking(check_update_via_util)
+                        .await
+                        .map_err(|e| EtcherError::new("Task join error", e.to_string()))?
+                },
+                Message::UpdateChecked,
+            ));
+        }
 
         if let Some(src) = initial_source {
             let normalized = normalize_image_url(&src);
@@ -747,6 +768,54 @@ impl EtcherApp {
                 Task::none()
             }
 
+            Message::ToggleAutoUpdates(val) => {
+                self.settings.updates_enabled = val;
+                let _ = self.settings.save();
+                if val && self.update_info.is_none() && !self.checking_updates {
+                    self.checking_updates = true;
+                    self.update_error = None;
+                    return Task::perform(
+                        async move {
+                            tokio::task::spawn_blocking(check_update_via_util)
+                                .await
+                                .map_err(|e| EtcherError::new("Task join error", e.to_string()))?
+                        },
+                        Message::UpdateChecked,
+                    );
+                }
+                Task::none()
+            }
+
+            Message::CheckForUpdates => {
+                if self.checking_updates {
+                    return Task::none();
+                }
+                self.checking_updates = true;
+                self.update_error = None;
+                Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(check_update_via_util)
+                            .await
+                            .map_err(|e| EtcherError::new("Task join error", e.to_string()))?
+                    },
+                    Message::UpdateChecked,
+                )
+            }
+
+            Message::UpdateChecked(res) => {
+                self.checking_updates = false;
+                match res {
+                    Ok(info) => {
+                        self.update_error = None;
+                        self.update_info = Some(info);
+                    }
+                    Err(e) => {
+                        self.update_error = Some(e.0.title);
+                    }
+                }
+                Task::none()
+            }
+
             Message::SetLocale(loc) => {
                 self.locale = loc;
                 self.settings.language = Some(loc.code().to_string());
@@ -850,7 +919,7 @@ impl EtcherApp {
 
         let base = container(
             iced::widget::column![
-                header::view(self.settings.disable_external_links),
+                header::view(self.settings.disable_external_links, self.update_info.as_ref()),
                 content,
             ]
             .width(Length::Fill)
@@ -1121,6 +1190,36 @@ fn probe_via_util(
             format!("{e}: {}", String::from_utf8_lossy(&output.stdout)),
         )
     })?
+}
+
+fn check_update_via_util() -> Result<UpdateCheckResult, EtcherError> {
+    use std::process::{Command, Stdio};
+
+    let util_path = find_util_binary()?;
+    let mut cmd = Command::new(&util_path);
+    cmd.arg("--check-update")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    let output = cmd
+        .output()
+        .map_err(|e| EtcherError::from_io_error(&e, util_path.to_str()))?;
+
+    if output.stdout.is_empty() {
+        return Err(EtcherError::new(
+            "Update check failed",
+            String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        ));
+    }
+
+    serde_json::from_slice::<Result<UpdateCheckResult, EtcherError>>(&output.stdout).map_err(
+        |e| EtcherError::new("Invalid update response", e.to_string()),
+    )?
 }
 
 fn flash_event_stream(

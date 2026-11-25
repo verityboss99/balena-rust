@@ -17,7 +17,8 @@ use etcher_core::units::{middle_ellipsis, pretty_bytes};
 use crate::app::{ActiveModal, DriveModalState, EtcherApp, Message, UrlModalState};
 use crate::icons;
 use crate::theme::{
-    self, COUNT_BLUE, FG_DISABLED, FONT_SEMIBOLD, MODAL_TEXT, PRIMARY, TEXT_HOVER_MUTED, WARNING,
+    self, COUNT_BLUE, FAIL_RED, FG_DISABLED, FONT_SEMIBOLD, MODAL_TEXT, PRIMARY, TEXT_HOVER_MUTED,
+    TEXT_MUTED, WARNING,
 };
 
 pub fn view<'a>(app: &'a EtcherApp, modal: &'a ActiveModal, locale: Locale) -> Element<'a, Message> {
@@ -840,6 +841,13 @@ fn view_settings<'a>(app: &'a EtcherApp, locale: Locale) -> Element<'a, Message>
         .text_size(14)
         .style(theme::modal_toggler);
 
+    let t4 = toggler(app.settings.updates_enabled)
+        .label(m.settings_auto_update)
+        .on_toggle(Message::ToggleAutoUpdates)
+        .size(20)
+        .text_size(14)
+        .style(theme::modal_toggler);
+
     let lang_row = row![
         text(format!("{}:", m.settings_language))
             .font(FONT_SEMIBOLD)
@@ -852,7 +860,7 @@ fn view_settings<'a>(app: &'a EtcherApp, locale: Locale) -> Element<'a, Message>
     .spacing(10)
     .align_y(Alignment::Center);
 
-    let mut body_col = column![t1, t2, t3, lang_row].spacing(14);
+    let mut body_col = column![t1, t2, t3, t4, lang_row].spacing(12);
 
     if let (Ok(addr), Ok(_key)) = (
         std::env::var("BALENA_SUPERVISOR_ADDRESS"),
@@ -888,10 +896,47 @@ fn view_settings<'a>(app: &'a EtcherApp, locale: Locale) -> Element<'a, Message>
     .padding([4, 0])
     .style(theme::plain_button(PRIMARY, MODAL_TEXT))
     .on_press(Message::OpenExternal(
-        "https://github.com/balena-io/etcher/blob/master/CHANGELOG.md".to_string(),
+        "https://github.com/verityboss99/balena-rust/releases".to_string(),
     ));
 
-    body_col = body_col.push(version_link);
+    let check_btn = button(
+        text(if app.checking_updates {
+            "Checking..."
+        } else {
+            "Check for updates"
+        })
+        .size(12)
+        .font(FONT_SEMIBOLD),
+    )
+    .padding([4, 10])
+    .style(theme::outline_pill_button)
+    .on_press_maybe((!app.checking_updates).then_some(Message::CheckForUpdates));
+
+    let mut version_row = row![version_link, check_btn]
+        .spacing(12)
+        .align_y(Alignment::Center);
+
+    if let Some(info) = &app.update_info {
+        if info.update_available {
+            version_row = version_row.push(
+                button(
+                    text(format!("v{} available", info.latest_version))
+                        .size(12)
+                        .font(FONT_SEMIBOLD)
+                        .color(Color::WHITE),
+                )
+                .padding([4, 10])
+                .style(theme::primary_pill_button)
+                .on_press(Message::OpenExternal(info.html_url.clone())),
+            );
+        } else {
+            version_row = version_row.push(text("Up to date").size(12).color(TEXT_MUTED));
+        }
+    } else if let Some(err) = &app.update_error {
+        version_row = version_row.push(text(err.as_str()).size(12).color(FAIL_RED));
+    }
+
+    body_col = body_col.push(version_row);
 
     let ok_btn = button(
         container(text(m.ok).font(FONT_SEMIBOLD).size(14))
